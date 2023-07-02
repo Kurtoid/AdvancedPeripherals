@@ -257,7 +257,7 @@ public class InventoryManagerPeripheral extends BasePeripheral<BlockEntityPeriph
         if (filter.rightPresent())
             return MethodResult.of(0, filter.getRight());
 
-        return MethodResult.of(removeCuriosFromPlayerCommon(invDirection, filter.getLeft()));
+        return removeCuriosFromPlayerCommon(invDirection, filter.getLeft());
     }
 
     @LuaFunction(value = {"listChest", "getItemsChest"}, mainThread = true)

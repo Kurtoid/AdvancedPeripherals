@@ -12,9 +12,7 @@
 
 <br>
 
-*A mod that adds many useful extensions to **[ComputerCraft]** <br>
-and aims to add features that were available in `1.12.2` <br>
-mods like **[PeripheralsPlusOne]**.*
+*This branch is specific to the Shot-for-Shot Gaming: Dogs of War modpack. It performs no compatability checks and is not intended for general use.*
 
 <br>
 <br>

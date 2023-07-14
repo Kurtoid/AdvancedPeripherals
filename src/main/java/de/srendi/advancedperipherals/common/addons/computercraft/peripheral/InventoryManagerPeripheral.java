@@ -1,5 +1,17 @@
 package de.srendi.advancedperipherals.common.addons.computercraft.peripheral;
 
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.logging.Logger;
+
+import net.minecraft.core.NonNullList;
+import net.minecraftforge.common.MinecraftForge;
+import org.jetbrains.annotations.NotNull;
+
 import dan200.computercraft.api.lua.LuaException;
 import dan200.computercraft.api.lua.LuaFunction;
 import dan200.computercraft.api.lua.MethodResult;
@@ -9,6 +21,7 @@ import de.srendi.advancedperipherals.common.blocks.blockentities.InventoryManage
 import de.srendi.advancedperipherals.common.configuration.APConfig;
 import de.srendi.advancedperipherals.common.util.LuaConverter;
 import de.srendi.advancedperipherals.common.util.Pair;
+import de.srendi.advancedperipherals.common.util.inventory.IStorageSystemItemHandler;
 import de.srendi.advancedperipherals.common.util.inventory.InventoryUtil;
 import de.srendi.advancedperipherals.common.util.inventory.ItemFilter;
 import de.srendi.advancedperipherals.lib.peripherals.BasePeripheral;
@@ -16,20 +29,27 @@ import net.minecraft.core.Direction;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.item.ArmorItem;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraftforge.common.util.LazyOptional;
 import net.minecraftforge.items.CapabilityItemHandler;
 import net.minecraftforge.items.IItemHandler;
 import net.minecraftforge.items.IItemHandlerModifiable;
+import net.minecraftforge.items.ItemHandlerHelper;
+import net.minecraftforge.eventbus.api.Event;
+
 import net.minecraftforge.items.wrapper.PlayerArmorInvWrapper;
 import net.minecraftforge.items.wrapper.PlayerInvWrapper;
 import net.minecraftforge.items.wrapper.PlayerOffhandInvWrapper;
 import top.theillusivec4.curios.api.CuriosApi;
-
-import org.jetbrains.annotations.NotNull;
-
-import java.util.*;
+import top.theillusivec4.curios.api.SlotContext;
+import top.theillusivec4.curios.api.event.CurioEquipEvent;
+import top.theillusivec4.curios.api.type.capability.ICurio;
+import top.theillusivec4.curios.api.type.capability.ICuriosItemHandler;
+import top.theillusivec4.curios.api.type.inventory.ICurioStacksHandler;
+import top.theillusivec4.curios.api.type.inventory.IDynamicStackHandler;
+import top.theillusivec4.curios.api.type.util.ICuriosHelper;
 
 public class InventoryManagerPeripheral extends BasePeripheral<BlockEntityPeripheralOwner<InventoryManagerEntity>> {
 
@@ -185,6 +205,93 @@ public class InventoryManagerPeripheral extends BasePeripheral<BlockEntityPeriph
         return items;
     }
 
+    private int addItemCurios(IItemHandler inventoryFrom, ICuriosItemHandler inventoryTo, ItemFilter filter)
+            throws LuaException {
+        if (inventoryFrom == null)
+            return 0;
+
+        Player player = getOwnerPlayer();
+        int fromSlot = filter.getFromSlot();
+        int toSlot = filter.getToSlot();
+
+        int amount = filter.getCount();
+        int transferableAmount = 0;
+
+        // The logic changes with storage systems since these systems do not have slots
+        if (inventoryFrom instanceof IStorageSystemItemHandler storageSystemHandler) {
+            // TODO
+            throw new LuaException("Storage systems are not supported yet (pull the item to a chest first)");
+        }
+        ICuriosHelper curiosHelper = CuriosApi.getCuriosHelper();
+
+        for (int i = fromSlot == -1 ? 0 : fromSlot; i < (fromSlot == -1 ? inventoryFrom.getSlots()
+                : fromSlot + 1); i++) { // either iterate over all slots or just the specified one
+            if (filter.test(inventoryFrom.getStackInSlot(i))) {
+                ItemStack extracted = inventoryFrom.extractItem(i, amount - transferableAmount, true);
+                AdvancedPeripherals.LOGGER.debug("Extracted {} items from slot {} ({} items in total)",
+                        extracted.getCount(), i, transferableAmount + extracted.getCount());
+                AdvancedPeripherals.LOGGER.debug("Item is {}", extracted.getItem().getRegistryName());
+                AdvancedPeripherals.LOGGER.debug("Item is {}", extracted.toString());
+                ItemStack inserted = null;
+                Item item = extracted.getItem();
+                Set<String> curioTags = curiosHelper.getCurioTags(item);
+                if (curioTags.size() == 0) {
+                    AdvancedPeripherals.LOGGER.debug("Item has no curio tags");
+                    continue;
+                }
+                ICuriosItemHandler handler = curiosHelper.getCuriosHandler(player).orElse(null);
+                if (handler == null) {
+                    AdvancedPeripherals.LOGGER.debug("player has no curios handler");
+                    continue;
+                }
+                Map<String, ICurioStacksHandler> curios = handler.getCurios();
+                AdvancedPeripherals.LOGGER.debug("player has {} curios", curios.size());
+
+                for (Map.Entry<String, ICurioStacksHandler> entry : curios.entrySet()) {
+                    IDynamicStackHandler stackHandler = entry.getValue().getStacks();
+
+                    for (int j = 0; j < stackHandler.getSlots(); j++) {
+                        String id = entry.getKey();
+                        NonNullList<Boolean> renderStates = entry.getValue().getRenders();
+                        SlotContext slotContext = new SlotContext(id, player, j, false,
+                                renderStates.size() > j && renderStates.get(j));
+                        CurioEquipEvent equipEvent = new CurioEquipEvent(extracted, slotContext);
+                        MinecraftForge.EVENT_BUS.post(equipEvent);
+                        Event.Result result = equipEvent.getResult();
+                        AdvancedPeripherals.LOGGER.debug("trying to insert into slot {} (result: {})", j, result);
+
+                        if (result == Event.Result.DENY) {
+                            continue;
+                        }
+
+                        if (result == Event.Result.ALLOW ||
+                                (curiosHelper.isStackValid(slotContext, extracted))) {
+                            ItemStack present = stackHandler.getStackInSlot(j);
+                            AdvancedPeripherals.LOGGER.debug("in slot {} is {}", j, present);
+
+                            if (present.isEmpty()) {
+                                // extract for real, and assign to slot
+                                inserted = inventoryFrom.extractItem(i, extracted.getCount(), false);
+                                stackHandler.setStackInSlot(j, inserted);
+                                transferableAmount += inserted.getCount();
+                                AdvancedPeripherals.LOGGER.debug("inserted {} items into slot {}", inserted.getCount(),
+                                        j);
+                                break;
+                            }
+                        }
+                    }
+                    if (transferableAmount >= filter.getCount())
+                        break;
+                }
+                if (transferableAmount >= filter.getCount())
+                    break;
+            }
+
+        }
+        return transferableAmount;
+
+    }
+
     private int addCuriosToPlayerCommon(String invDirection, ItemFilter filter) throws LuaException {
         Direction direction = validateSide(invDirection);
 
@@ -194,13 +301,17 @@ public class InventoryManagerPeripheral extends BasePeripheral<BlockEntityPeriph
                         .orElse(null)
                 : null;
 
-        Optional<IItemHandler> maybeInventoryTo = getCuriosHandler();
-        if (maybeInventoryTo.isEmpty())
+        Optional<ICuriosItemHandler> maybeInventoryTo = getCuriosHandler();
+        if (!maybeInventoryTo.isPresent())
             return 0;
 
-        IItemHandler inventoryTo = maybeInventoryTo.get();
+        ICuriosItemHandler inventoryTo = maybeInventoryTo.get();
 
-        return InventoryUtil.moveItem(inventoryFrom, inventoryTo, filter);
+        if (filter.getCount() != 1) {
+            throw new LuaException("Curios only supports count of 1");
+        }
+
+        return addItemCurios(inventoryFrom, inventoryTo, filter);
 
     }
 
@@ -213,11 +324,11 @@ public class InventoryManagerPeripheral extends BasePeripheral<BlockEntityPeriph
                         .orElse(null)
                 : null;
 
-        Optional<IItemHandler> maybeInventoryFrom = getCuriosHandler();
-        if (maybeInventoryFrom.isEmpty())
+        LazyOptional<IItemHandlerModifiable> maybeInventoryFrom = getCuriosHelper().getEquippedCurios(getOwnerPlayer());
+        if (!maybeInventoryFrom.isPresent())
             return MethodResult.of(0, "INVENTORY_FROM_INVALID");
 
-        IItemHandler inventoryFrom = maybeInventoryFrom.get();
+        IItemHandler inventoryFrom = maybeInventoryFrom.orElse(null);
 
         return MethodResult.of(InventoryUtil.moveItem(inventoryFrom, inventoryTo, filter));
     }
@@ -240,6 +351,7 @@ public class InventoryManagerPeripheral extends BasePeripheral<BlockEntityPeriph
             return MethodResult.of(0, filter.getRight());
 
         // filter is good, try to add the item
+        AdvancedPeripherals.LOGGER.debug("Trying to add curios to player");
         return MethodResult.of(addCuriosToPlayerCommon(invDirection, filter.getLeft()));
     }
 
@@ -365,13 +477,17 @@ public class InventoryManagerPeripheral extends BasePeripheral<BlockEntityPeriph
         return Pair.of(handler, slot);
     }
 
-    private Optional<IItemHandler> getCuriosHandler() throws LuaException {
-        LazyOptional<IItemHandlerModifiable> handler = CuriosApi.getCuriosHelper().getEquippedCurios(getOwnerPlayer());
+    private Optional<ICuriosItemHandler> getCuriosHandler() throws LuaException {
+        LazyOptional<ICuriosItemHandler> handler = CuriosApi.getCuriosHelper().getCuriosHandler(getOwnerPlayer());
         if (handler.isPresent()) {
             return Optional.of(handler.orElse(null));
         } else {
             return Optional.empty();
         }
+    }
+
+    private ICuriosHelper getCuriosHelper() throws LuaException {
+        return CuriosApi.getCuriosHelper();
     }
 
     /**

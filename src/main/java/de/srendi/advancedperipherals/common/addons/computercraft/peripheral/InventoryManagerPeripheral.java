@@ -38,7 +38,7 @@ import net.minecraftforge.items.IItemHandler;
 import net.minecraftforge.items.IItemHandlerModifiable;
 import net.minecraftforge.items.ItemHandlerHelper;
 import net.minecraftforge.eventbus.api.Event;
-
+import net.minecraftforge.items.wrapper.CombinedInvWrapper;
 import net.minecraftforge.items.wrapper.PlayerArmorInvWrapper;
 import net.minecraftforge.items.wrapper.PlayerInvWrapper;
 import net.minecraftforge.items.wrapper.PlayerOffhandInvWrapper;
@@ -194,14 +194,17 @@ public class InventoryManagerPeripheral extends BasePeripheral<BlockEntityPeriph
     public final List<Object> getCuriosItems() throws LuaException {
         List<Object> items = new ArrayList<>();
         // not sure how to handle slots, since Curios slots can change depending on config, advancements, etc.
-        CuriosApi.getCuriosHelper().getEquippedCurios(getOwnerPlayer()).ifPresent(handler -> {
-            for (int slot = 0; slot < handler.getSlots(); slot++) {
-                ItemStack stack = handler.getStackInSlot(slot);
-                if (!stack.isEmpty()) {
-                    items.add(LuaConverter.stackToObjectWithSlot(stack, slot));
-                }
+        IItemHandler curiosItems = CuriosApi.getCuriosHelper().getCuriosHandler(getOwnerPlayer())
+                .map(handler -> new CombinedInvWrapper(handler.getCurios().values().stream()
+                        .map(ICurioStacksHandler::getStacks)
+                        .toArray(IItemHandlerModifiable[]::new)))
+                .orElse(new CombinedInvWrapper());
+        for (int i = 0; i < curiosItems.getSlots(); i++) {
+            ItemStack stack = curiosItems.getStackInSlot(i);
+            if (!stack.isEmpty()) {
+                items.add(LuaConverter.stackToObjectWithSlot(stack, i));
             }
-        });
+        }
         return items;
     }
 
@@ -212,6 +215,7 @@ public class InventoryManagerPeripheral extends BasePeripheral<BlockEntityPeriph
 
         Player player = getOwnerPlayer();
         int fromSlot = filter.getFromSlot();
+        // TODO: use the toSlot
         int toSlot = filter.getToSlot();
 
         int amount = filter.getCount();
@@ -324,13 +328,14 @@ public class InventoryManagerPeripheral extends BasePeripheral<BlockEntityPeriph
                         .orElse(null)
                 : null;
 
-        LazyOptional<IItemHandlerModifiable> maybeInventoryFrom = getCuriosHelper().getEquippedCurios(getOwnerPlayer());
-        if (!maybeInventoryFrom.isPresent())
-            return MethodResult.of(0, "INVENTORY_FROM_INVALID");
+        IItemHandler curiosItems = CuriosApi.getCuriosHelper().getCuriosHandler(getOwnerPlayer())
+                .map(handler -> new CombinedInvWrapper(handler.getCurios().values().stream()
+                        .map(ICurioStacksHandler::getStacks)
+                        .toArray(IItemHandlerModifiable[]::new)))
+                .orElse(new CombinedInvWrapper());
 
-        IItemHandler inventoryFrom = maybeInventoryFrom.orElse(null);
 
-        return MethodResult.of(InventoryUtil.moveItem(inventoryFrom, inventoryTo, filter));
+        return MethodResult.of(InventoryUtil.moveItem(curiosItems, inventoryTo, filter));
     }
 
     @LuaFunction(mainThread = true, value = { "addCuriosToPlayer", "addCurios" })
@@ -355,15 +360,58 @@ public class InventoryManagerPeripheral extends BasePeripheral<BlockEntityPeriph
         return MethodResult.of(addCuriosToPlayerCommon(invDirection, filter.getLeft()));
     }
 
+    @LuaFunction(mainThread = true, value = { "addCuriosToPlayerNBT", "addCuriosNBT" })
+    public final MethodResult addCuriosToPlayerNBT(String invDirection, int count, Optional<Integer> slot,
+            Optional<Map<?, ?>> item)
+            throws LuaException {
+        Pair<ItemFilter, String> filter;
+        Map<Object, Object> filterMap = new HashMap<>();
+
+        slot.ifPresent(toSlot -> filterMap.put("toSlot", toSlot));
+        filterMap.put("count", count);
+
+        item.ifPresent(filterMap::putAll);
+
+        filter = ItemFilter.parse(filterMap);
+        if (filter.rightPresent()) // right contains the error message
+            return MethodResult.of(0, filter.getRight());
+
+        // filter is good, try to add the item
+        AdvancedPeripherals.LOGGER.debug("Trying to add curios to player");
+        return MethodResult.of(addCuriosToPlayerCommon(invDirection, filter.getLeft()));
+    }
+
     @LuaFunction(mainThread = true, value = {"removeCuriosFromPlayer", "removeCurios"})
-    public final MethodResult removeCuriosFromPlayer(String invDirection, int count, Optional<Integer> slot, Optional<String> item) throws LuaException {
+    public final MethodResult removeCuriosFromPlayer(String invDirection, int count, Optional<Integer> slot,
+            Optional<String> item) throws LuaException {
         Pair<ItemFilter, String> filter;
         Map<Object, Object> filterMap = new HashMap<>();
 
         // Deprecated! Will be removed in the future. This exists to maintain compatibility within the same mc version
         item.ifPresent(itemName -> filterMap.put("name", itemName));
-        slot.ifPresent(toSlot -> filterMap.put("toSlot", toSlot));
         filterMap.put("count", count);
+
+        slot.ifPresent(fromSlot -> filterMap.put("fromSlot", fromSlot));
+        filterMap.put("toSlot", -1); // curios may have many slots, which may not align with destination slots
+
+        filter = ItemFilter.parse(filterMap);
+        if (filter.rightPresent())
+            return MethodResult.of(0, filter.getRight());
+
+        return removeCuriosFromPlayerCommon(invDirection, filter.getLeft());
+    }
+
+    @LuaFunction(mainThread = true, value = { "removeCuriosFromPlayerNBT", "removeCuriosNBT" })
+    public final MethodResult removeCuriosFromPlayerNBT(String invDirection, int count, Optional<Integer> slot,
+            Optional<Map<?, ?>> item) throws LuaException {
+        Pair<ItemFilter, String> filter;
+        Map<Object, Object> filterMap = new HashMap<>();
+
+        slot.ifPresent(fromSlot -> filterMap.put("fromSlot", fromSlot));
+        filterMap.put("count", count);
+        filterMap.put("toSlot", -1); // curios may have many slots, which may not align with destination slots
+
+        item.ifPresent(filterMap::putAll);
 
         filter = ItemFilter.parse(filterMap);
         if (filter.rightPresent())
